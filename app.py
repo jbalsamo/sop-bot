@@ -10,6 +10,7 @@ import os
 import time
 from typing import Dict, Any, List, TypedDict
 import asyncio
+import tiktoken  # For token counting
 
 # LangChain imports
 from langchain_core.prompts import ChatPromptTemplate
@@ -71,6 +72,8 @@ class State(TypedDict):
     openai_response: str
     semantic_search_response: List[Dict[str, Any]]
     vector_search_response: List[Dict[str, Any]]
+    combined_answer: str
+    token_usage: Dict[str, int]
 
 # Initialize LangChain Azure OpenAI client
 azure_llm = AzureChatOpenAI(
@@ -79,7 +82,9 @@ azure_llm = AzureChatOpenAI(
     openai_api_key=AZ_API_KEY,
     azure_endpoint=AZ_BASE_URL,
     temperature=0.7,
-    max_tokens=500
+    max_tokens=1000,  # Increased to 1000 to prevent truncation
+    verbose=True,  # Enable verbose mode for debugging
+    streaming=False  # Disable streaming to ensure we get token counts
 )
 
 # Initialize Azure OpenAI Embeddings
@@ -115,7 +120,7 @@ prompt_template = ChatPromptTemplate.from_messages([
         - Provide answers at a 7th-grade reading level (Flesch-Kincaid 70-80)
         - Detect and respond in the user's language
         - Focus exclusively on medical, health, legal, or psychological topics
-        - Include warnings about seeking professional medical advice when appropriate
+        - ALWAYS end your response with this EXACT medical disclaimer: "**Medical Disclaimer**: Always seek professional medical advice for diagnosis and treatment. This information is not a substitute for medical advice from a healthcare provider."
         - Include sources, filename, or citations when available.
 
         LANGUAGE REQUIREMENTS:
@@ -153,9 +158,29 @@ async def query_openai(state: State) -> State:
     """Query Azure OpenAI with the user's question using LangChain and a specialized medical prompt"""
     try:
         print("Querying Azure OpenAI with specialized medical prompt")
-        response = await llm_chain.ainvoke({"query": state["query"]})
+
+        # Format the query for token counting
+        query_text = state["query"]
+
+        # Get response from Azure OpenAI
+        response = await llm_chain.ainvoke({"query": query_text})
+
+        # Track token usage using tiktoken
+        enc = tiktoken.encoding_for_model("gpt-4")
+        # Count tokens in prompt (approximate using the system prompt + query)
+        system_prompt = "You are an experienced medical professional providing accurate, accessible health information."
+        prompt_tokens = len(enc.encode(system_prompt + query_text))
+        # Count tokens in response
+        completion_tokens = len(enc.encode(response))
+        total_tokens = prompt_tokens + completion_tokens
+
+        # Update token usage in state
+        state["token_usage"]["openai_query"] = total_tokens
+        state["token_usage"]["total"] += total_tokens
+
+        # Store the response
         state["openai_response"] = response
-        print("Received response from Azure OpenAI")
+        print(f"Received response from Azure OpenAI (used {total_tokens} tokens)")
     except Exception as e:
         print(f"Error querying OpenAI: {str(e)}")
         state["openai_response"] = f"Error querying OpenAI: {str(e)}"
@@ -210,11 +235,14 @@ async def query_semantic_search(state: State) -> State:
                     Medical question: {query}
                         Review these additional medical sources to provide an answer for the question above:
                         - Don't use data outside of the context to answer the question.
-                        - Patient-centered educational material
-                        - Real-world applications and examples
-                        - Prevention and self-care guidance
-                        - Treatment options from authoritative sources
+                        - Be VERY concise and brief in your answer (maximum 250 words)
+                        - Focus only on the most important information from these categories:
+                          - Patient-centered educational material
+                          - Real-world applications and examples
+                          - Prevention and self-care guidance
+                          - Treatment options from authoritative sources
                         - Extract citation and filename for each source used
+                        - ALWAYS end your response with this EXACT medical disclaimer: "**Medical Disclaimer**: Always seek professional medical advice for diagnosis and treatment. This information is not a substitute for medical advice from a healthcare provider."
                         Include citations and/or filenames of sources at the bottom if they have links or filenames.
 
                     CONTEXT INFORMATION:
@@ -232,6 +260,19 @@ async def query_semantic_search(state: State) -> State:
                     # Get answer from Azure OpenAI
                     answer_response = await azure_llm.ainvoke(formatted_prompt)
                     answer_text = answer_response.content
+
+                    # Track token usage using tiktoken
+                    enc = tiktoken.encoding_for_model("gpt-4")
+                    # Count tokens in prompt
+                    prompt_tokens = len(enc.encode(str(formatted_prompt)))
+                    # Count tokens in response
+                    completion_tokens = len(enc.encode(answer_text))
+                    total_tokens = prompt_tokens + completion_tokens
+
+                    # Update token usage in state
+                    state["token_usage"]["semantic_search"] = total_tokens
+                    state["token_usage"]["total"] += total_tokens
+                    print(f"Semantic search answer generated using {total_tokens} tokens")
 
                     # Store both the raw results and the generated answer
                     state["semantic_search_response"] = {
@@ -388,11 +429,14 @@ async def query_vector_search(state: State) -> State:
                     Medical question: {query}
             Using only the provided medical reference documents, analyze and answer the question above with:
               - Don't use trained data outside of the provided context.
-              - Focus on peer-reviewed research and clinical guidelines
-              - Extract specific relevant data and statistics
+              - Be VERY concise and brief in your answer (maximum 250 words)
+              - Focus only on the most important information from:
+                - Peer-reviewed research and clinical guidelines
+                - Specific relevant data and statistics
               - Note the title, publication dates, and authors of sources used
               - Highlight any contradicting information
               - Extract citation and filename for each source used
+              - ALWAYS end your response with this EXACT medical disclaimer: "**Medical Disclaimer**: Always seek professional medical advice for diagnosis and treatment. This information is not a substitute for medical advice from a healthcare provider."
             Include citations and/or filenames of sources at the bottom.
 
                     CONTEXT INFORMATION:
@@ -410,6 +454,19 @@ async def query_vector_search(state: State) -> State:
                     # Get answer from Azure OpenAI
                     answer_response = await azure_llm.ainvoke(formatted_prompt)
                     answer_text = answer_response.content
+
+                    # Track token usage using tiktoken
+                    enc = tiktoken.encoding_for_model("gpt-4")
+                    # Count tokens in prompt
+                    prompt_tokens = len(enc.encode(str(formatted_prompt)))
+                    # Count tokens in response
+                    completion_tokens = len(enc.encode(answer_text))
+                    total_tokens = prompt_tokens + completion_tokens
+
+                    # Update token usage in state
+                    state["token_usage"]["vector_search"] = total_tokens
+                    state["token_usage"]["total"] += total_tokens
+                    print(f"Vector search answer generated using {total_tokens} tokens")
 
                     # Store both the raw results and the generated answer
                     state["vector_search_response"] = {
@@ -473,6 +530,73 @@ async def query_vector_search(state: State) -> State:
 
     return state
 
+async def combine_answers(state: State) -> State:
+    """Combine the answers from all three sources into a comprehensive summary"""
+    try:
+        print("Generating comprehensive summary from all three sources")
+
+        # Extract the answers from each source
+        openai_answer = state["openai_response"]
+
+        semantic_response = state["semantic_search_response"]
+        semantic_answer = semantic_response["answer"] if isinstance(semantic_response, dict) and "answer" in semantic_response else "No answer available from semantic search."
+
+        vector_response = state["vector_search_response"]
+        vector_answer = vector_response["answer"] if isinstance(vector_response, dict) and "answer" in vector_response else "No answer available from vector search."
+
+        # Create a prompt template for combining the answers
+        combine_prompt = ChatPromptTemplate.from_template("""
+        Given the following:
+
+        Question: {question}
+        Answer 1: {openai_answer}
+        Answer 2: {semantic_answer}
+        Answer 3: {vector_answer}
+
+        Create a comprehensive summary by combining the three previous answers to the question above:
+          - Resolve any conflicts between sources
+          - Prioritize most recent and authoritative information
+          - Include both clinical data and practical guidance
+          - Maintain 7th-grade reading level throughout
+          - End with this COMPLETE medical disclaimer: "**Medical Disclaimer**: Always seek professional medical advice for diagnosis and treatment. This information is not a substitute for medical advice from a healthcare provider."
+        """)
+
+        # Format the prompt with the query and answers
+        formatted_prompt = combine_prompt.format(
+            question=state["query"],
+            openai_answer=openai_answer,
+            semantic_answer=semantic_answer,
+            vector_answer=vector_answer
+        )
+
+        # Get combined answer from Azure OpenAI
+        combined_response = await azure_llm.ainvoke(formatted_prompt)
+        combined_answer = combined_response.content
+
+        # Track token usage using tiktoken
+        enc = tiktoken.encoding_for_model("gpt-4")
+        # Count tokens in prompt
+        prompt_tokens = len(enc.encode(str(formatted_prompt)))
+        # Count tokens in response
+        completion_tokens = len(enc.encode(combined_answer))
+        total_tokens = prompt_tokens + completion_tokens
+
+        # Update token usage in state
+        state["token_usage"]["combined_summary"] = total_tokens
+        state["token_usage"]["total"] += total_tokens
+        print(f"Comprehensive summary generated using {total_tokens} tokens")
+
+        # Store the combined answer in the state
+        state["combined_answer"] = combined_answer
+        print("Generated comprehensive summary successfully")
+
+    except Exception as e:
+        error_msg = f"Error generating comprehensive summary: {str(e)}"
+        print(error_msg)
+        state["combined_answer"] = error_msg
+
+    return state
+
 # Create the LangGraph workflow
 async def run_parallel_rag(query: str) -> Dict[str, Any]:
     """Execute the parallel RAG workflow"""
@@ -481,7 +605,15 @@ async def run_parallel_rag(query: str) -> Dict[str, Any]:
         "query": query,
         "openai_response": "",
         "semantic_search_response": [],
-        "vector_search_response": []
+        "vector_search_response": [],
+        "combined_answer": "",
+        "token_usage": {
+            "openai_query": 0,
+            "semantic_search": 0,
+            "vector_search": 0,
+            "combined_summary": 0,
+            "total": 0
+        }
     }
 
     # Create tasks for parallel execution
@@ -499,6 +631,9 @@ async def run_parallel_rag(query: str) -> Dict[str, Any]:
     # Merge results (all tasks modify the same state object, but we'll take the last one to be safe)
     final_state = results[-1]
 
+    # Run the combine answers step sequentially after parallel tasks
+    final_state = await combine_answers(final_state)
+
     # Add execution time
     execution_time = end_time - start_time
     final_state["execution_time"] = execution_time
@@ -507,18 +642,70 @@ async def run_parallel_rag(query: str) -> Dict[str, Any]:
 
 # Define a function to print the results
 def print_results(results: Dict[str, Any]) -> None:
-    """Print the results from all three sources"""
+    """Print the results from all three sources and save to a file"""
+    # Create a file to save the complete results - append mode to keep history
+    with open("diabetes_search_results.txt", "a", encoding="utf-8") as f:
+        # Add clear separator and timestamp at the top of each query
+        from datetime import datetime
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"\n\n{'#'*100}\n")
+        f.write(f"TIMESTAMP: {current_time}\n")
+        f.write(f"{'#'*100}\n")
+        f.write("\n" + "="*80 + "\n")
+        f.write(f"QUERY: {results['query']}\n")
+        f.write("="*80 + "\n")
+
+        f.write("\n" + "-"*30 + " AZURE OPENAI DIRECT RESPONSE " + "-"*30 + "\n")
+        f.write(results["openai_response"] + "\n")
+
+        f.write("\n" + "-"*30 + " SEMANTIC SEARCH ANSWER (STANDARD INDEX) " + "-"*30 + "\n")
+        semantic_response = results["semantic_search_response"]
+        if isinstance(semantic_response, dict) and "answer" in semantic_response:
+            f.write(semantic_response["answer"] + "\n")
+        else:
+            f.write("No answer generated from semantic search results.\n")
+
+        f.write("\n" + "-"*30 + " VECTOR SEARCH ANSWER (VECTOR INDEX) " + "-"*30 + "\n")
+        vector_response = results["vector_search_response"]
+        if isinstance(vector_response, dict) and "answer" in vector_response:
+            f.write(vector_response["answer"] + "\n")
+        else:
+            f.write("No answer generated from vector search results.\n")
+
+        f.write("\n" + "-"*30 + " COMPREHENSIVE SUMMARY " + "-"*30 + "\n")
+        if "combined_answer" in results and results["combined_answer"]:
+            f.write(results["combined_answer"] + "\n")
+        else:
+            f.write("No comprehensive summary was generated.\n")
+
+        f.write("\n" + "-"*30 + " PERFORMANCE " + "-"*30 + "\n")
+        f.write(f"Total execution time: {results['execution_time']:.2f} seconds\n")
+
+        if "token_usage" in results:
+            token_usage = results["token_usage"]
+            f.write("\n" + "-"*30 + " TOKEN USAGE " + "-"*30 + "\n")
+            f.write(f"OpenAI Direct Query: {token_usage.get('openai_query', 0)} tokens\n")
+            f.write(f"Semantic Search: {token_usage.get('semantic_search', 0)} tokens\n")
+            f.write(f"Vector Search: {token_usage.get('vector_search', 0)} tokens\n")
+            f.write(f"Comprehensive Summary: {token_usage.get('combined_summary', 0)} tokens\n")
+            f.write(f"Total Tokens: {token_usage.get('total', 0)} tokens\n")
+
+        f.write("="*80 + "\n")
+
+    # Also print to console as before
     print("\n" + "="*80)
     print(f"QUERY: {results['query']}")
     print("="*80)
 
     print("\n" + "-"*30 + " AZURE OPENAI DIRECT RESPONSE " + "-"*30)
+    # Print the full OpenAI response without truncation
     print(results["openai_response"])
 
     print("\n" + "-"*30 + " SEMANTIC SEARCH ANSWER (STANDARD INDEX) " + "-"*30)
     semantic_response = results["semantic_search_response"]
     if isinstance(semantic_response, dict):
         if "answer" in semantic_response:
+            # Print the full semantic search answer without truncation
             print(semantic_response["answer"])
         else:
             print("No answer generated from semantic search results.")
@@ -532,12 +719,13 @@ def print_results(results: Dict[str, Any]) -> None:
             else:
                 print(f"Title: {result.get('title', 'N/A')}")
                 content = result.get('content', 'N/A')
-                print(f"Content: {content[:150]}..." if len(content) > 150 else f"Content: {content}")
+                print(f"Content: {content}")
 
     print("\n" + "-"*30 + " VECTOR SEARCH ANSWER (VECTOR INDEX) " + "-"*30)
     vector_response = results["vector_search_response"]
     if isinstance(vector_response, dict):
         if "answer" in vector_response:
+            # Print the full vector search answer without truncation
             print(vector_response["answer"])
         else:
             print("No answer generated from vector search results.")
@@ -551,11 +739,31 @@ def print_results(results: Dict[str, Any]) -> None:
             else:
                 print(f"Title: {result.get('title', 'N/A')}")
                 content = result.get('content', 'N/A')
-                print(f"Content: {content[:150]}..." if len(content) > 150 else f"Content: {content}")
+                print(f"Content: {content}")
+
+    print("\n" + "-"*30 + " COMPREHENSIVE SUMMARY " + "-"*30)
+    if "combined_answer" in results and results["combined_answer"]:
+        # Print the full combined answer without any truncation
+        combined_answer = results["combined_answer"]
+        print(combined_answer)
+    else:
+        print("No comprehensive summary was generated.")
 
     print("\n" + "-"*30 + " PERFORMANCE " + "-"*30)
     print(f"Total execution time: {results['execution_time']:.2f} seconds")
+
+    # Print token usage statistics
+    if "token_usage" in results:
+        token_usage = results["token_usage"]
+        print("\n" + "-"*30 + " TOKEN USAGE " + "-"*30)
+        print(f"OpenAI Direct Query: {token_usage.get('openai_query', 0)} tokens")
+        print(f"Semantic Search: {token_usage.get('semantic_search', 0)} tokens")
+        print(f"Vector Search: {token_usage.get('vector_search', 0)} tokens")
+        print(f"Comprehensive Summary: {token_usage.get('combined_summary', 0)} tokens")
+        print(f"Total Tokens: {token_usage.get('total', 0)} tokens")
+
     print("="*80 + "\n")
+    print("\nComplete results (including any truncated content) have been saved to 'diabetes_search_results.txt'")
 
 async def main():
     """Main function to run the application"""
