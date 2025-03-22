@@ -1,0 +1,41 @@
+graph TD
+    A[User Query] --> B{Cache Check}
+    B -->|Cache Hit| C[Return Cached Result]
+    B -->|Cache Miss| D[Initialize State]
+    
+    D --> E[Parallel Execution]
+    
+    subgraph Parallel Paths
+        F[Query OpenAI]
+        G[Semantic Search]
+        H[Vector Search]
+    end
+    
+    E --> F
+    E --> G
+    E --> H
+    
+    F --> I[OpenAI Response]
+    G --> J[Semantic Search Response]
+    H --> K[Vector Search Response]
+    
+    I --> L[Merge Results]
+    J --> L
+    K --> L
+    
+    L --> M[Combine Answers]
+    M --> N[Generate Summary]
+    
+    N --> O[Cache Result]
+    O --> P[Return Final State]
+    
+    C --> Q[End]
+    P --> Q
+    
+    classDef cache fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef parallel fill:#bbf,stroke:#333,stroke-width:1px;
+    classDef process fill:#dfd,stroke:#333,stroke-width:1px;
+    
+    class B,C,O cache;
+    class F,G,H,I,J,K parallel;
+    class D,E,L,M,N,P process;
