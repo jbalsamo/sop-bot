@@ -974,6 +974,21 @@ async def run_parallel_rag(query: str) -> Dict[str, Any]:
     cached_result = cache_manager.get_cached_result(query)
     if cached_result:
         print(f"Using cached result for query: {query}\n")
+        # Update the result to indicate it's from cache
+        cached_result["from_cache"] = True
+        # Reset token usage to zero to indicate no API calls were made
+        if "token_usage" in cached_result:
+            cached_result["token_usage"] = {
+                "openai_query": 0,
+                "semantic_search": 0,
+                "vector_search": 0,
+                "combined_summary": 0,
+                "total": 0,
+                "note": "Retrieved from cache - no tokens used"
+            }
+        # Update execution time to current retrieval time (near zero)
+        cached_result["execution_time"] = 0.001  # Negligible time for cache retrieval
+        cached_result["cache_retrieval_time"] = time.time()
         return cached_result
 
     # Create a query processor instance for methods that require instance state
@@ -1032,6 +1047,11 @@ def print_results(results: Dict[str, Any]) -> None:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         f.write(f"\n\n{'#'*100}\n")
         f.write(f"TIMESTAMP: {current_time}\n")
+        # Indicate if result is from cache
+        if results.get("from_cache", False):
+            f.write(f"SOURCE: Retrieved from cache\n")
+        else:
+            f.write(f"SOURCE: Fresh API call\n")
         f.write(f"{'#'*100}\n")
         f.write("\n" + "="*80 + "\n")
         f.write(f"QUERY: {results['query']}\n")
